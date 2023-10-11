@@ -1,153 +1,105 @@
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
-from threading import Thread
-from pathlib import Path
-import urllib.parse
-import mimetypes
-import socket
-import pathlib
 import json
+import pathlib
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import unquote_plus
+import socket
+import mimetypes
 
+IP = '127.0.0.1'
+SERVER_PORT = 3000
+CLIENT_PORT = 5000
 
-BASE_DIR = pathlib.Path()
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
-class MainServer(BaseHTTPRequestHandler):
-    def do_GET(self):
-        return self.router()
-    
-    def do_POST(self):
-        content_length = int(self.headers['Content-Length'])
-        post_data = self.rfile.read(content_length).decode('utf-8')
-        self.send_post_data_via_socket(post_data)
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
-        response_data = json.dumps({"message": "POST request received"})
-        self.wfile.write(response_data.encode('utf-8'))
-    
     def send_html_file(self, filename, status=200):
-        self.send_response(200)
+        self.send_response(status)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
-        with open(filename, 'rb') as fd:
-            self.wfile.write(fd.read())
-                                
-    def send_static(self, file):
-        self.send_response(200)
-        mt = mimetypes.guess_type(self.path)
-        if mt:
-            self.send_header('Content-type', mt[0])
-        else:
-            self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        with open(file, 'rb') as fd:
-            self.wfile.write(fd.read())
+        with open(filename, 'rb') as file:
+            self.wfile.write(file.read())
 
-    def router(self):
-        pr_url = urllib.parse.urlparse(self.path)
-        
-        match pr_url.path:
+    def do_GET(self):
+        url = self.path
+
+        match url:
             case '/':
                 self.send_html_file('index.html')
             case '/message':
                 self.send_html_file('message.html')
             case _:
-                file = BASE_DIR.joinpath(pr_url.path[1:])
-                if file.exists():
-                    self.send_static(file)
+                if pathlib.Path().joinpath(url[1:]).exists():
+                    self.send_static()
                 else:
-                    self.send_html_file('error.html', status=404)
+                    self.send_html_file('error.html', 404)
 
-    def send_post_data_via_socket(self, message):
-        host = socket.gethostname()
-        port = 5000
+    def do_POST(self):
+        data = self.rfile.readline(int(self.headers['Content-Length']))
+        self.send_response(302)
+        self.send_data(data=data)
+        self.send_header('Location', '/message')
+        self.end_headers()
 
-        client_socket = socket.socket()
-        client_socket.connect((host, port))
+    def send_data(self, data: bytes):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect((IP, CLIENT_PORT))
+        sock.send(data)
 
-        params = urllib.parse.parse_qs(message)
-
-        data = {
-            "username": params.get("username", [""])[0],
-            "message": params.get("message", [""])[0]
-        }
-
-        json_data = json.dumps(data)
-
-        client_socket.sendall(json_data.encode('utf-8'))
-
-        client_socket.close()
+    def send_static(self):
+        self.send_response(200)
+        mt = mimetypes.guess_type(self.path)
+        if mt:
+            self.send_header("Content-type", mt[0])
+        else:
+            self.send_header("Content-type", 'text/plain')
+        self.end_headers()
+        with open(f'.{self.path}', 'rb') as file:
+            self.wfile.write(file.read())
 
 
-def server_socket():
-    print("Socket start listening")
-    host = socket.gethostname() 
-    port = 5000
-
-    server_socket = socket.socket()
-    server_socket.bind((host, port))
-    server_socket.listen(2)
-    conn, address = server_socket.accept()
-    print(f"Connection from {address}")
-    while True:
-        post_data = conn.recv(1024).decode('utf-8')
-        if not post_data:
-            break
-        print(f'received message: {post_data}')
-        
-        try:
-            data = json.loads(post_data)
-            print("Decoded JSON data:", data)
-            
-
-            if isinstance(data, dict):
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-                data['timestamp'] = timestamp
-
-                if "timestamp" in data:
-                    del data['timestamp']
-                    
-                with open('storage/data.json', 'r+') as f:
-                    stored_data = json.load(f) if f.readable() else {}
-                    stored_data[timestamp] = data
-                    f.seek(0)  
-                    json.dump(stored_data, f, indent=2)
-                print("Data successfully saved to data.json.")
-            else:
-                print("Received data is not a valid dictionary.")
-                
-        except json.JSONDecodeError:
-            print("Received data is not valid JSON.")
-            
-    conn.close()
-
-               
-def run(server_class=HTTPServer, handler_class=MainServer):
-    
-    directory_path = Path("storage")
-    if directory_path.exists():
-        print("Directory exists! ")
-    else:
-        print("Directory does not exists, creating...")
-        directory_path.mkdir(exist_ok=True)
-
-    server_adress = ('', 3000)
-    http = server_class(server_adress, handler_class)
+def run_web_server():
+    httpd = HTTPServer((IP, SERVER_PORT), SimpleHTTPRequestHandler)
     try:
-        print("Start running...")
-        socket_sever = Thread(target=server_socket)
-        socket_sever.start()
-        http.serve_forever()
+        httpd.serve_forever()
+        print('Running web server...')
     except KeyboardInterrupt:
-        http.server_close()
-        
+        httpd.server_close()
 
-def check_directory_existence(directory_path):
-    directory_path = Path("storage")
-    directory_path.mkdir(exist_ok=True)
-    data_file = directory_path / "data.json"
-    data_file.touch(exist_ok=True)
+
+def run_socket_server():
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server.bind((IP, CLIENT_PORT))
+    try:
+        while True:
+            data, address = server.recvfrom(1024)
+            print(f'Received data: {data.decode()} from: {address}')
+            write_in_json(data)
+    except KeyboardInterrupt:
+        print(f'Destroy server')
+    finally:
+        server.close()
+
+
+def write_in_json(data: bytes):
+    query_data = unquote_plus(data.decode())
+    data = {key: value for key, value in [el.split('=') for el in query_data.split('&')]}
+    new_data = {str(datetime.now()): data}
+
+    json_data = json.load(open('storage\data.json'))
+    json_data.update(new_data)
+
+    with open('storage\data.json', 'w') as file:
+        json.dump(json_data, file, indent=4)
+        print(f'Record was added to json.file\n')
 
 
 if __name__ == '__main__':
-    run()
+    web_server = Thread(target=run_web_server)
+    socket_server = Thread(target=run_socket_server)
+
+    web_server.start()
+    socket_server.start()
+
+    web_server.join()
+    socket_server.join()
